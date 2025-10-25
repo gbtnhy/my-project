@@ -1,0 +1,120 @@
+import cv2
+import time
+import numpy as np
+import cv2
+import numpy as np
+
+cap = cv2.VideoCapture('LaneVideo.mp4')
+width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+fps = cap.get(cv2.CAP_PROP_FPS)
+fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+out = cv2.VideoWriter('output_stable.mp4', fourcc, fps, (width, height))
+
+rh, r = 0.7, 20
+xx1, yyl, xx2, yy2 = int(width * 0.1), int(height * rh), int(width * 0.9), int(height * rh)
+p1, p2, p3, p4 = [r, height - r], [width - r, height - r], [xx2, yy2], [xx1, yy2]
+
+
+prev_left, prev_right = None, None# 上一幀的擬合結果
+alpha = 0.5  # 平滑係數（越大越穩定但延遲）
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        print("影片結束或無法讀取。")
+        break
+
+
+    output = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)) # 建立形態學運算的 kernel
+    output = cv2.dilate(output, kernel) # 膨脹：連接斷裂的線條
+    output = cv2.GaussianBlur(output, (5, 5), 0) # 高斯模糊：平滑影像，降低雜訊
+    output = cv2.erode(output, kernel) # 侵蝕：去除小白點
+    output = cv2.Canny(output, 150, 200) # Canny 邊緣偵測
+    
+    # 霍夫轉換
+    HOUGH_THRESHOLD = 40 # 捕捉到多條線段
+    HOUGH_MIN_LINE_LENGTH = 15 #檢出破碎的車道線
+    HOUGH_MAX_LINE_GAP = 80 #中斷線連接
+        
+    lines = cv2.HoughLinesP(
+        output,
+        1,
+        np.pi / 180,
+        HOUGH_THRESHOLD,
+        None,
+        HOUGH_MIN_LINE_LENGTH,
+        HOUGH_MAX_LINE_GAP
+    )
+    
+
+    img2 = frame.copy() 
+    midpoint = width // 2
+    left_points, right_points = [], []
+
+    #分類左右車道
+    if lines is not None:
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            slope = (y2 - y1) / (x2 - x1 + 1e-6)
+            if abs(slope) < 0.5 or abs(slope) > 1.2:  #避開斜率太平或太陡的線
+                continue
+            if y1 < height * 0.7 and y2 < height * 0.7: #避開位置太高的線
+                continue
+            if slope < 0 and x1 < midpoint and x2 < midpoint+200: #判左線
+                left_points.extend([(x1, y1), (x2, y2)])
+            elif slope > 0 and x1 > midpoint-200 and x2 > midpoint: #判右線
+                right_points.extend([(x1, y1), (x2, y2)])
+
+    # 擬合
+    def draw_lane(points, color, prev_fit):
+        if len(points) >= 2: #至少有兩點
+            points = np.array(points)
+            fit = np.polyfit(points[:, 1], points[:, 0], 1)  # x = a*y + b
+            a, b = fit
+            # 與上一幀平滑融合
+            if prev_fit is not None:
+                a = alpha * prev_fit[0] + (1 - alpha) * a
+                b = alpha * prev_fit[1] + (1 - alpha) * b
+        elif prev_fit is not None: #繼承上幀
+            a, b = prev_fit[0], prev_fit[1]
+        else:
+            return None
+
+        y1, y2 = height, int(height * 0.8)
+        x1, x2 = int(a * y1 + b), int(a * y2 + b)
+        cv2.line(img2, (x1, y1), (x2, y2), color, 6)
+        return (a, b, x1 ,x2)
+
+    prev_left = draw_lane(left_points, (0, 0, 255), prev_left)   # 左車道線
+    prev_right = draw_lane(right_points, (0, 0, 255), prev_right) # 右車道線
+
+    
+    if prev_left is not None and prev_right is not None:
+        mid1 = int((prev_left[2] + prev_right[2]) / 2)#車道中線
+        mid2 = int((prev_left[3] + prev_right[3]) / 2)
+        cv2.line(img2, (mid1, height), (mid2, int(height * 0.8)), (0, 255, 0), 4)
+
+        left_bottom = (prev_left[2], height)
+        left_top    = (prev_left[3], int(height*0.8))
+        right_bottom = (prev_right[2], height)
+        right_top    = (prev_right[3], int(height*0.8))
+    
+        lane_pts = np.array([left_bottom, left_top, right_top, right_bottom], np.int32)# 多邊形
+        lane_pts = lane_pts.reshape((-1, 1, 2))
+    
+        overlay = img2.copy()
+        cv2.fillPoly(overlay, [lane_pts], (0, 255, 0))  # 填色
+        alpha_fill = 0.3 
+        img2 = cv2.addWeighted(overlay, alpha_fill, img2, 1 - alpha_fill, 0)
+        
+    cv2.imshow('Lane Detection (Stable)', img2)
+    out.write(img2)
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+out.release()
+cv2.destroyAllWindows()
