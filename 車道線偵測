@@ -1,6 +1,4 @@
-import cv2
-import time
-import numpy as np
+##增加分類左右車道已避開斜率太平或太陡何位置太高的線，建立一次方程式的線標示車道，本幀與前一幀一次方程式相融以減少標示線跳躍，若現一幀無讀取到便繼承前一幀，劃出車道中現跟給車道上色##
 import cv2
 import numpy as np
 
